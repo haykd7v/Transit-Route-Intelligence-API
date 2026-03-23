@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <title>Mapa de Pontos</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    body { margin: 0; font-family: Arial, sans-serif; }
+    #map { height: 100vh; }
+
+    .form {
+      position: absolute;
+      top: 10px;
+      left: 50px;
+      z-index: 1000;
+      background: white;
+      padding: 12px;
+      border-radius: 8px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.2);
+      min-width: 360px;
+      max-width: 420px;
+    }
+
+    .form input, .form button, .form select {
+      width: 100%;
+      box-sizing: border-box;
+      margin-top: 6px;
+      padding: 8px;
+    }
+
+    .status {
+      margin-top: 8px;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+
+<div class="form">
+  <input id="id_veiculo" placeholder="id_veiculo">
+  <button onclick="buscarViagens()">Buscar viagens</button>
+
+  <select id="lista_viagens">
+    <option value="">Selecione uma viagem</option>
+  </select>
+
+  <button onclick="carregarMapa()">Carregar mapa</button>
+  <div class="status" id="status"></div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script>
+  const map = L.map('map').setView([-22.90, -43.20], 11);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19
+  }).addTo(map);
+
+  let camadaAtual = null;
+  let viagensCache = [];
+
+  async function buscarViagens() {
+    const status = document.getElementById("status");
+    const id_veiculo = document.getElementById("id_veiculo").value.trim();
+    const select = document.getElementById("lista_viagens");
+
+    status.innerText = "Buscando viagens...";
+    select.innerHTML = '<option value="">Selecione uma viagem</option>';
+
+    try {
+      const params = new URLSearchParams();
+      if (id_veiculo) params.append("id_veiculo", id_veiculo);
+      params.append("limite", "50");
+
+      const url = `http://127.0.0.1:8000/api/viagens?${params.toString()}`;
+      const response = await fetch(url);
+      const data = await response.json();
+
+      if (!response.ok) {
+        status.innerText = data.detail || "Erro ao buscar viagens.";
+        return;
+      }
+
+      viagensCache = data.viagens || [];
+
+      if (viagensCache.length === 0) {
+        status.innerText = "Nenhuma viagem encontrada.";
+        return;
+      }
+
+      viagensCache.forEach((v, i) => {
+        const option = document.createElement("option");
+        option.value = i;
+        option.textContent = `${v.id_veiculo} | ${v.sentido} | ${v.datetime_partida}`;
+        select.appendChild(option);
+      });
+
+      status.innerText = `${viagensCache.length} viagens encontradas.`;
+    } catch (error) {
+      console.error(error);
+      status.innerText = `Erro ao buscar viagens: ${error.message}`;
+    }
+  }
+
+  async function carregarMapa() {
+    const status = document.getElementById("status");
+    const indice = document.getElementById("lista_viagens").value;
+
+    if (indice === "") {
+      status.innerText = "Selecione uma viagem.";
+      return;
+    }
+
+    const viagem = viagensCache[Number(indice)];
+
+    const params = new URLSearchParams({
+      id_veiculo: viagem.id_veiculo,
+      sentido: viagem.sentido,
+      datetime_partida: viagem.datetime_partida.replace("T", " ")
+    });
+
+    const url = `http://127.0.0.1:8000/api/pontos?${params.toString()}`;
+    status.innerText = "Carregando mapa...";
+
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+
+      if (!response.ok) {
+        status.innerText = data.detail || "Erro ao carregar mapa.";
+        return;
+      }
+
+      if (!data.geojson || !data.geojson.features || data.geojson.features.length === 0) {
+        status.innerText = "Nenhum dado retornado.";
+        return;
+      }
+
+      if (camadaAtual) {
+        map.removeLayer(camadaAtual);
+      }
+
+      camadaAtual = L.geoJSON(data.geojson, {
+        pointToLayer: function (feature, latlng) {
+          const tipo = feature.properties.tipo;
+
+          if (tipo === "inicio") {
+            return L.circle(latlng, {
+              radius: 500,
+              color: "green",
+              weight: 2,
+              fillColor: "green",
+              fillOpacity: 0.15
+            });
+          }
+
+          if (tipo === "fim") {
+            return L.circle(latlng, {
+              radius: 500,
+              color: "red",
+              weight: 2,
+              fillColor: "red",
+              fillOpacity: 0.15
+            });
+          }
+
+          return L.circleMarker(latlng, {
+            radius: 4,
+            fillColor: "blue",
+            color: "#000",
+            weight: 1,
+            opacity: 1,
+            fillOpacity: 0.8
+          });
+        },
+        style: function (feature) {
+          if (feature.geometry.type === "LineString") {
+            return {
+              color: "blue",
+              weight: 3,
+              opacity: 0.9
+            };
+          }
+        }
+      }).addTo(map);
+
+      const bounds = camadaAtual.getBounds();
+      if (bounds.isValid()) {
+        map.fitBounds(bounds);
+      }
+
+      status.innerHTML = `
+        OK.<br>
+        Pontos brutos: ${data.viagem.quantidade_pontos_brutos}<br>
+        Pontos filtrados: ${data.viagem.quantidade_pontos_filtrados}
+      `;
+    } catch (error) {
+      console.error(error);
+      status.innerText = `Erro ao carregar mapa: ${error.message}`;
+    }
+  }
+</script>
+
+</body>
+</html>
